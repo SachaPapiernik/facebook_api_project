@@ -251,38 +251,82 @@ async def search_groups(
 
 # User
 
-class UserBase(BaseModel):
+class User(BaseModel):
     name: str
     email: str
 
-class UserCreate(UserBase):
-    pass
+class UserInDB(User):
+    id: str
 
-class User(UserBase):
-    id: int
-
-db_user_df = pd.DataFrame(columns=["id", "name", "email"])
-user_id = 1
-
-@app.post("/users/", response_model=User)
-async def create_user(user: UserCreate):
-    global user_id
-    new_user_data = {"id": user_id, **user.model_dump()}
-    db_user_df.loc[user_id] = new_user_data
-    user_id += 1
-    return new_user_data
-
-@app.get("/users/{user_id}", response_model=User)
-async def read_user(user_id: int):
+# Create User
+@app.post("/users/", response_model=UserInDB)
+async def create_user(user: User):
     try:
-        user_data = db_user_df.loc[user_id].to_dict()
-        return user_data
-    except:
+        user_data = {"name": user.name, "email": user.email}
+        result = user_collection.insert_one(user_data)
+        user_in_db = UserInDB(**user.model_dump(), id=str(result.inserted_id))
+        return user_in_db
+    except DuplicateKeyError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
+
+# Read User
+@app.get("/users/{user_id}", response_model=UserInDB)
+async def read_user(user_id: str):
+    user_data = user_collection.find_one({"_id": ObjectId(user_id)})
+    if user_data:
+        user_data["id"] = str(user_data["_id"])  # Convert ObjectId to str
+        return UserInDB(**user_data)
+    else:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+# Update User
+@app.put("/users/{user_id}", response_model=UserInDB)
+async def update_user(user_id: str, updated_user: User):
+    existing_user = user_collection.find_one({"_id": ObjectId(user_id)})
+    if existing_user:
+        # Check if the updated email is already in use by another user
+        existing_user_with_updated_email = user_collection.find_one({"email": updated_user.email, "_id": {"$ne": ObjectId(user_id)}})
+        if existing_user_with_updated_email:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
+
+        # Update the user data
+        user_data = {"$set": {"name": updated_user.name, "email": updated_user.email}}
+        user_collection.update_one({"_id": ObjectId(user_id)}, user_data)
+
+        # Retrieve and return the updated user data
+        updated_user_data = user_collection.find_one({"_id": ObjectId(user_id)})
+        updated_user_data["id"] = str(updated_user_data["_id"])  # Convert ObjectId to str
+
+        return UserInDB(**updated_user_data)
+
+    raise HTTPException(status_code=404, detail="User not found")
+
+# Delete User
+@app.delete("/users/{user_id}", response_model=dict)
+async def delete_user(user_id: str):
+    result = user_collection.delete_one({"_id": ObjectId(user_id)})
+    if result.deleted_count == 1:
+        return {"message": "User deleted successfully"}
+    else:
         raise HTTPException(status_code=404, detail="User not found")
 
-@app.get("/users/", response_model=List[User])
-async def read_users(skip: int = 0, limit: int = 10):
-    return db_user_df.iloc[skip : skip + limit].to_dict(orient="records")
+# Search Users
+@app.get("/users/", response_model=List[UserInDB])
+async def search_users(name: str = None, email: str = None):
+    query = {}
+    if name:
+        query["name"] = {"$regex": f".*{name}.*", "$options": "i"}
+    if email:
+        query["email"] = {"$regex": f".*{email}.*", "$options": "i"}
+
+    users_data = user_collection.find(query)
+    
+    # Convert ObjectId to string and include in the response
+    users_with_str_id = [
+        UserInDB(**{**user, "id": str(user["_id"])}) for user in users_data
+    ]
+    
+    return users_with_str_id
 
 # Thread / Message
 
