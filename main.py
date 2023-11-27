@@ -493,73 +493,49 @@ async def search_messages_in_thread(
     messages = message_collection.find(query)
     return [MessageInDB(id=str(message["_id"]), **message) for message in messages]
 
-# photo NOT FINISH
-################################
-################################
-################################
+# Photo Album
 
-class PhotoBase(BaseModel):
-    user: str
-
-
-class Photo(PhotoBase):
-    id: str
-    
-class PhotoCreate(PhotoBase):
+class PhotoAlbum(BaseModel):
     pass
 
-class Photo(PhotoBase):
-    id: str
+class PhotoAlbumInDB(PhotoAlbum):
+    id:str
+    event_id:str
 
-class PhotoAlbumBase(BaseModel):
-    event_id: str
-    photos: List[Photo] = []
+# Create a photo album in an event
+@app.post("/events/{event_id}/photoalbum", response_model=PhotoAlbumInDB)
+async def create_photo_album(event_id: str):
+    # Check if the event exists
+    existing_event = event_collection.find_one({"_id": ObjectId(event_id)})
+    if not existing_event:
+        raise HTTPException(status_code=404, detail="Event not found")
 
-class PhotoAlbumCreate(PhotoAlbumBase):
-    pass
+    photo_album_data = {"event_id": event_id}
+    result = photo_album_collection.insert_one(photo_album_data)
+    inserted_id = str(result.inserted_id)
+    return PhotoAlbumInDB(id=inserted_id, **photo_album_data)
 
-class PhotoAlbum(PhotoAlbumBase):
-    id: str
+# Read photo albums in an event
+@app.get("/events/{event_id}/photoalbum", response_model=List[PhotoAlbumInDB])
+async def read_photo_albums(event_id: str):
+    photo_albums = photo_album_collection.find({"event_id": event_id})
+    return [PhotoAlbumInDB(id=str(photo_album["_id"]), **photo_album) for photo_album in photo_albums]
 
-db_photo_album = {}
-photo_album_id = 1
+# Read a photo album by ID in an event
+@app.get("/events/{event_id}/photoalbum/{photo_album_id}", response_model=PhotoAlbumInDB)
+async def read_photo_album(event_id: str, photo_album_id: str):
+    photo_album_data = photo_album_collection.find_one({"_id": ObjectId(photo_album_id), "event_id": event_id})
+    if photo_album_data:
+        photo_album_data["id"] = str(photo_album_data["_id"])  # Convert ObjectId to str
+        return PhotoAlbumInDB(**photo_album_data)
+    else:
+        raise HTTPException(status_code=404, detail="Photo Album not found")
 
-@app.post("/photoalbum/", response_model=PhotoAlbum)
-async def create_photo_album(photo_album: PhotoAlbumCreate):
-    global photo_album_id
-    new_photo_album_data = {"id": f"{photo_album_id}", **photo_album.model_dump()}
-    db_photo_album[f"{photo_album_id}"] = new_photo_album_data
-    photo_album_id += 1
-    return PhotoAlbum(**new_photo_album_data)
-
-@app.get("/photoalbum/{photo_album_id}", response_model=PhotoAlbum)
-async def read_photo_album(photo_album_id: str):
-    photo_album_data = db_photo_album.get(photo_album_id)
-    if photo_album_data is None:
-        raise HTTPException(status_code=404, detail="Photo album not found")
-    return photo_album_data
-
-# Endpoint to handle photo uploads
-@app.post("/photoalbum/{photo_album_id}/photo/")
-async def upload_photo(photo_album_id: str, filename: UploadFile = File(...), user:str = Form(...)):
-    photo_album_data = db_photo_album.get(photo_album_id)
-    if photo_album_data is None:
-        raise HTTPException(status_code=404, detail="Photo album not found")
-    
-    new_photo_album_data = {
-        "id": f"{len(photo_album_data['photos']) + 1}",
-        "user":user,
-    }
-    photo_album_data["photos"].append(new_photo_album_data)
-    # Do whatever processing you need with the uploaded file
-    # For example, save it to a specific directory
-    with open(f"photo/{photo_album_id}_{new_photo_album_data['id']}.png", "wb") as f:
-        f.write(filename.file.read())
-
-    return {"message": "Photo uploaded successfully"}
-
-################################
-################################
-################################
-
-# pool
+# Delete a photo album by ID in an event
+@app.delete("/events/{event_id}/photoalbum/{photo_album_id}")
+async def delete_photo_album(event_id: str, photo_album_id: str):
+    result = photo_album_collection.delete_one({"_id": ObjectId(photo_album_id), "event_id": event_id})
+    if result.deleted_count == 1:
+        return {"message": "Photo Album deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Photo Album not found")
