@@ -157,45 +157,97 @@ async def search_events(
 
 # Group
 
-class GroupBase(BaseModel):
+class Group(BaseModel):
     name: str
     description: str
     icon: str
     cover_photo: str
-    group_type: str  # Assuming group_type can be 'public', 'private', or 'secret'
+    group_type: str
     allow_members_to_publish: bool
     allow_members_to_create_events: bool
     admin: List[str] = []
-    members: List[str] = []
 
-class GroupCreate(GroupBase):
-    pass
+class GroupInDB(Group):
+    id: str
 
-class Group(GroupBase):
-    id: int
+# Create a group
+@app.post("/groups/", response_model=GroupInDB)
+async def create_group(group: Group):
+    group_data = {**group.model_dump()}
+    result = group_collection.insert_one(group_data)
+    inserted_id = str(result.inserted_id)
+    return GroupInDB(id=inserted_id, **group.model_dump())
 
-db_group_df = pd.DataFrame(columns=["id", "name", "description", "icon", "cover_photo", "group_type", "allow_members_to_publish", "allow_members_to_create_events", "admin", "members"])
-group_id = 1
-
-@app.post("/groups/", response_model=Group)
-async def create_group(group: GroupCreate):
-    global group_id
-    new_group_data = {"id": group_id, **group.model_dump()}
-    db_group_df.loc[group_id] = new_group_data
-    group_id += 1
-    return new_group_data
-
-@app.get("/groups/{group_id}", response_model=Group)
-async def read_group(group_id: int):
-    try:
-        group_data = db_group_df.loc[group_id].to_dict()
-        return group_data
-    except: 
+# Read a group by ID
+@app.get("/groups/{group_id}", response_model=GroupInDB)
+async def read_group(group_id: str):
+    group_data = group_collection.find_one({"_id": ObjectId(group_id)})
+    if group_data:
+        group_data["id"] = str(group_data["_id"])  # Convert ObjectId to str
+        return GroupInDB(**group_data)
+    else:
         raise HTTPException(status_code=404, detail="Group not found")
-    
-@app.get("/groups/", response_model=List[Group])
-async def read_groups(skip: int = 0, limit: int = 10):
-    return db_group_df.iloc[skip : skip + limit].to_dict(orient="records")
+
+# Update a group by ID
+@app.put("/groups/{group_id}", response_model=GroupInDB)
+async def update_group(group_id: str, updated_group: Group):
+    existing_group = group_collection.find_one({"_id": ObjectId(group_id)})
+    if existing_group:
+        group_data = {
+            "$set": {
+                "name": updated_group.name,
+                "description": updated_group.description,
+                "icon": updated_group.icon,
+                "cover_photo": updated_group.cover_photo,
+                "group_type": updated_group.group_type,
+                "allow_members_to_publish": updated_group.allow_members_to_publish,
+                "allow_members_to_create_events": updated_group.allow_members_to_create_events,
+                "admin": updated_group.admin,
+            }
+        }
+        result = group_collection.update_one({"_id": ObjectId(group_id)}, group_data)
+        if result.modified_count == 1:
+            return GroupInDB(id=group_id, **updated_group.model_dump())
+
+    raise HTTPException(status_code=404, detail="Group not found")
+
+# Delete a group by ID
+@app.delete("/groups/{group_id}", response_model=dict)
+async def delete_group(group_id: str):
+    result = group_collection.delete_one({"_id": ObjectId(group_id)})
+    if result.deleted_count == 1:
+        return {"message": "Group deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+# Search groups
+@app.get("/groups", response_model=List[GroupInDB])
+async def search_groups(
+    name: str = Query(None, title="Group Name", description="Search groups by name"),
+    group_type: str = Query(None, title="Group Type", description="Filter groups by type"),
+    allow_publish: bool = Query(None, title="Allow Members to Publish", description="Filter groups by publishing permission"),
+    allow_create_events: bool = Query(None, title="Allow Members to Create Events", description="Filter groups by event creation permission"),
+    admin: str = Query(None, title="Admin", description="Search groups by admin"),
+):
+    query = {}
+
+    if name:
+        query["name"] = {"$regex": name, "$options": "i"}
+
+    if group_type:
+        query["group_type"] = group_type
+
+    if allow_publish:
+        query["allow_members_to_publish"] = allow_publish
+
+    if allow_create_events:
+        query["allow_members_to_create_events"] = allow_create_events
+
+    if admin:
+        query["admin"] = {"$in": [admin]}
+
+    groups = group_collection.find(query)
+    return [GroupInDB(id=str(group["_id"]), **group) for group in groups]
 
 # User
 
