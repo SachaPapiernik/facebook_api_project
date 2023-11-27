@@ -328,74 +328,170 @@ async def search_users(name: str = None, email: str = None):
     
     return users_with_str_id
 
-# Thread / Message
+# Thread
 
-class MessageBase(BaseModel):
+class Thread(BaseModel):
+    parents_id: str
+    text: str
+    user: str
+    timestamp: datetime
+
+class ThreadInDB(Thread):
+    id: str
+
+# Create a thread
+@app.post("/threads", response_model=ThreadInDB)
+async def create_thread(thread_data: Thread):
+    # Check if parents_id exists if it is not None
+    if thread_data.parents_id:
+        print(thread_data.parents_id)
+        existing_event_parent = event_collection.find_one({"_id": ObjectId(thread_data.parents_id)})
+        existing_group_parent = group_collection.find_one({"_id": ObjectId(thread_data.parents_id)})
+        if (existing_event_parent == None) and (existing_group_parent == None):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent not found")
+
+    thread_data_dict = {**thread_data.model_dump()}
+    result = thread_collection.insert_one(thread_data_dict)
+    inserted_id = str(result.inserted_id)
+    return ThreadInDB(id=inserted_id, **thread_data_dict)
+
+# Read a thread by ID
+@app.get("/threads/{thread_id}", response_model=ThreadInDB)
+async def read_thread(thread_id: str):
+    thread_data = thread_collection.find_one({"_id": ObjectId(thread_id)})
+    if thread_data:
+        thread_data["id"] = str(thread_data["_id"])  # Convert ObjectId to str
+        return ThreadInDB(**thread_data)
+    else:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+# Update a thread by ID
+@app.put("/threads/{thread_id}", response_model=ThreadInDB)
+async def update_thread(thread_id: str, updated_thread: Thread):
+    existing_thread = thread_collection.find_one({"_id": ObjectId(thread_id)})
+    if existing_thread:
+        thread_data_dict = updated_thread.model_dump()
+        result = thread_collection.update_one({"_id": ObjectId(thread_id)}, {"$set": thread_data_dict})
+        if result.modified_count == 1:
+            return ThreadInDB(id=thread_id, **thread_data_dict)
+    raise HTTPException(status_code=404, detail="Thread not found")
+
+# Delete a thread by ID
+@app.delete("/threads/{thread_id}", response_model=dict)
+async def delete_thread(thread_id: str):
+    result = thread_collection.delete_one({"_id": ObjectId(thread_id)})
+    if result.deleted_count == 1:
+        return {"message": "Thread deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+# Search threads
+@app.get("/threads", response_model=List[ThreadInDB])
+async def search_threads(
+    text: str = Query(None, title="Thread Text", description="Search threads by text"),
+    user: str = Query(None, title="Thread User", description="Filter threads by user"),
+    timestamp_from: datetime = Query(None, title="Timestamp From", description="Filter threads by timestamp from"),
+    timestamp_to: datetime = Query(None, title="Timestamp To", description="Filter threads by timestamp to"),
+):
+    query = {}
+
+    if text:
+        query["text"] = {"$regex": text, "$options": "i"}
+
+    if user:
+        query["user"] = user
+
+    if timestamp_from:
+        query["timestamp"] = {"$gte": timestamp_from}
+
+    if timestamp_to:
+        query["timestamp"]["$lte"] = timestamp_to
+
+    threads = thread_collection.find(query)
+    return [ThreadInDB(id=str(thread["_id"]), **thread) for thread in threads]
+
+# Message
+
+class Message(BaseModel):
     text: str
     user: str
     timestamp: datetime
     parents: str
 
-class MessageCreate(MessageBase):
-    pass
-
-class Message(MessageBase):
+class MessageInDB(Message):
+    thread_id:str
     id: str
 
-class ThreadBase(BaseModel):
-    text: str
-    user: str
-    timestamp: datetime
-    messages: List[Message] = []
+# Create a message
+@app.post("/threads/{thread_id}/messages", response_model=MessageInDB)
+async def create_message(thread_id: str, message_data: Message):
+    message_data_dict = message_data.model_dump()
+    message_data_dict["thread_id"] = thread_id
+    result = message_collection.insert_one(message_data_dict)
+    inserted_id = str(result.inserted_id)
+    return MessageInDB(id=inserted_id, **message_data_dict)
 
-class ThreadCreate(ThreadBase):
-    pass
+# Read messages in a thread
+@app.get("/threads/{thread_id}/messages", response_model=List[MessageInDB])
+async def read_messages(thread_id: str):
+    messages = message_collection.find({"thread_id": thread_id})
+    return [MessageInDB(id=str(message["_id"]), **message) for message in messages]
 
-class Thread(ThreadBase):
-    id: str
+# Read a message by ID in a thread
+@app.get("/threads/{thread_id}/messages/{message_id}", response_model=MessageInDB)
+async def read_message(thread_id: str, message_id: str):
+    message_data = message_collection.find_one({"_id": ObjectId(message_id), "thread_id": thread_id})
+    if message_data:
+        message_data["id"] = str(message_data["_id"])  # Convert ObjectId to str
+        return MessageInDB(**message_data)
+    else:
+        raise HTTPException(status_code=404, detail="Message not found")
 
-db_threads = {}
-thread_id = 1
+# Update a message by ID in a thread
+@app.put("/threads/{thread_id}/messages/{message_id}", response_model=MessageInDB)
+async def update_message(thread_id: str, message_id: str, updated_message: Message):
+    existing_message = message_collection.find_one({"_id": ObjectId(message_id), "thread_id": thread_id})
+    if existing_message:
+        message_data_dict = updated_message.model_dump()
+        result = message_collection.update_one({"_id": ObjectId(message_id)}, {"$set": message_data_dict})
+        if result.modified_count == 1:
+            return MessageInDB(thread_id=thread_id, id=message_id, **message_data_dict)
+    raise HTTPException(status_code=404, detail="Message not found")
 
-@app.post("/threads/", response_model=Thread)
-async def create_thread(thread: ThreadCreate):
-    global thread_id
-    new_thread_data = {"id": f"{thread_id}", **thread.model_dump()}
-    db_threads[f"{thread_id}"] = new_thread_data
-    thread_id += 1
-    return Thread(**new_thread_data)
+# Delete a message by ID in a thread
+@app.delete("/threads/{thread_id}/messages/{message_id}")
+async def delete_message(thread_id: str, message_id: str):
+    result = message_collection.delete_one({"_id": ObjectId(message_id), "thread_id": thread_id})
+    if result.deleted_count == 1:
+        return {"message": "Message deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Message not found")
 
-@app.get("/threads/{thread_id}", response_model=Thread)
-async def read_thread(thread_id: str):
-    thread_data = db_threads.get(thread_id)
-    if thread_data is None:
-        raise HTTPException(status_code=404, detail="Thread not found")
-    return thread_data
+# Search messages in a thread
+@app.get("/threads/{thread_id}/messages/search/", response_model=List[MessageInDB])
+async def search_messages_in_thread(
+    thread_id: str,
+    text: str = Query(None, title="Message Text", description="Search messages by text"),
+    user: str = Query(None, title="Message User", description="Filter messages by user"),
+    timestamp_from: datetime = Query(None, title="Timestamp From", description="Filter messages by timestamp from"),
+    timestamp_to: datetime = Query(None, title="Timestamp To", description="Filter messages by timestamp to"),
+):
+    query = {"thread_id": thread_id}
 
-@app.get("/threads/{thread_id}/messages/{message_id}", response_model=Message)
-async def read_message_in_thread(thread_id: str, message_id: str):
-    thread_data = db_threads.get(thread_id)
-    if thread_data is None:
-        raise HTTPException(status_code=404, detail="Thread not found")
+    if text:
+        query["text"] = {"$regex": text, "$options": "i"}
 
-    message_data = next((msg for msg in thread_data["messages"] if msg["id"] == message_id), None)
-    if message_data is None:
-        raise HTTPException(status_code=404, detail="Message not found in thread")
+    if user:
+        query["user"] = user
 
-    return message_data
+    if timestamp_from:
+        query["timestamp"] = {"$gte": timestamp_from}
 
-@app.post("/threads/{thread_id}/messages/", response_model=Message)
-async def create_message_in_thread(thread_id: str, message: MessageCreate):
-    thread_data = db_threads.get(thread_id)
-    if thread_data is None:
-        raise HTTPException(status_code=404, detail="Thread not found")
+    if timestamp_to:
+        query["timestamp"]["$lte"] = timestamp_to
 
-    new_message_data = {
-        "id": f"{len(thread_data['messages']) + 1}",
-        **message.model_dump(),
-    }
-    thread_data["messages"].append(new_message_data)
-    return new_message_data
+    messages = message_collection.find(query)
+    return [MessageInDB(id=str(message["_id"]), **message) for message in messages]
 
 # photo NOT FINISH
 ################################
