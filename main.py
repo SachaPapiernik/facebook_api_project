@@ -539,3 +539,123 @@ async def delete_photo_album(event_id: str, photo_album_id: str):
         return {"message": "Photo Album deleted successfully"}
     else:
         raise HTTPException(status_code=404, detail="Photo Album not found")
+    
+# Photo
+
+class PhotoBase(BaseModel):
+    user_id: str
+
+class PhotoInDB(PhotoBase):
+    id: str
+    photo_album_id: str
+    filename: str
+
+# Create a photo in a photo album
+@app.post("/photoalbum/{photo_album_id}/photo", response_model=PhotoInDB)
+async def create_photo(
+    photo_album_id: str,
+    user_id: str = Body(...),
+    photo: UploadFile = File(...),
+):
+    # Check if the photo album exists
+    existing_photo_album = photo_album_collection.find_one({"_id": ObjectId(photo_album_id)})
+    if not existing_photo_album:
+        raise HTTPException(status_code=404, detail="Photo Album not found")
+    
+    existing_user = user_collection.find_one({"_id": ObjectId(user_id)})
+    if not existing_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    photo_data = {
+        "photo_album_id": photo_album_id,
+        "user_id": user_id,
+        "file": photo.file.read(),
+        "filename": photo.filename,
+    }
+    result = photo_collection.insert_one(photo_data)
+    inserted_id = str(result.inserted_id)
+
+    # Return the created photo
+    return PhotoInDB(id=inserted_id, **photo_data)
+
+# Read photos in a photo album
+@app.get("/photoalbum/{photo_album_id}/photo", response_model=List[PhotoInDB])
+async def read_photos(photo_album_id: str):
+    photos = photo_collection.find({"photo_album_id": photo_album_id})
+    return [PhotoInDB(id=str(photo["_id"]), **photo) for photo in photos]
+
+# Read a photo by ID in a photo album
+@app.get("/photoalbum/{photo_album_id}/photo/{photo_id}")
+async def read_photo(photo_album_id: str, photo_id: str):
+    photo_data = photo_collection.find_one({"_id": ObjectId(photo_id), "photo_album_id": photo_album_id})
+    
+    if photo_data:
+        return StreamingResponse(io.BytesIO(photo_data["file"]), media_type="image/jpeg")
+    else:
+        raise HTTPException(status_code=404, detail="Photo not found")
+
+# Update a photo by ID in a photo album
+@app.put("/photoalbum/{photo_album_id}/photo/{photo_id}", response_model=PhotoInDB)
+async def update_photo(
+    photo_album_id: str,
+    photo_id: str,
+    user_id: str = Form(...),
+    photo: UploadFile = File(...),
+):
+    existing_photo = photo_collection.find_one({"_id": ObjectId(photo_id), "photo_album_id": photo_album_id})
+    if existing_photo:
+        # Update the user field
+        result = photo_collection.update_one(
+            {"_id": ObjectId(photo_id), "photo_album_id": photo_album_id},
+            {"$set": {"user": user_id}}
+        )
+
+        if result.modified_count == 1:
+            # Update the photo file if a new file is provided
+            if photo:
+                updated_photo_data = {
+                    "file": photo.file.read(),
+                    "filename": photo.filename,
+                }
+                result = photo_collection.update_one(
+                    {"_id": ObjectId(photo_id), "photo_album_id": photo_album_id},
+                    {"$set": updated_photo_data}
+                )
+                if result.modified_count == 1:
+                    existing_photo.update(updated_photo_data)
+
+            # Return the updated photo
+            return PhotoInDB(id=photo_id, **existing_photo)
+
+    raise HTTPException(status_code=404, detail="Photo not found")
+
+# Delete a photo by ID in a photo album
+@app.delete("/photoalbum/{photo_album_id}/photo/{photo_id}")
+async def delete_photo(photo_album_id: str, photo_id: str):
+    result = photo_collection.delete_one({"_id": ObjectId(photo_id), "photo_album_id": photo_album_id})
+    if result.deleted_count == 1:
+        return {"message": "Photo deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Photo not found")
+    
+# Search photos in a photo album
+@app.get("/photoalbum/photo/search", response_model=List[PhotoInDB])
+async def search_photos(
+    photo_album_id: str = Query(None, title="photo_album_id", description="Search photos by album id"),
+    user: str = Query(None, title="User", description="Search photos by user"),
+    filename: str = Query(None, title="Filename", description="Search photos by filename"),
+):
+    query = {}
+    
+    # Add filters based on query parameters
+    if user:
+        query["user"] = {"$regex": user, "$options": "i"}
+    
+    if photo_album_id:
+        query['photo_album_id'] = {"$regex": photo_album_id, "$options": "i"}
+    
+    if filename:
+        query["filename"] = {"$regex": filename, "$options": "i"}
+
+    photos = photo_collection.find(query)
+    return [PhotoInDB(id=str(photo["_id"]), **photo) for photo in photos]
